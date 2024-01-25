@@ -8,11 +8,14 @@ output:
 ---
 
 ```{r setup, include=FALSE}
+# load packages
 library("tidymodels")
 library("tidyverse")
 library("dplyr")
 library("janitor")
-library("corrplot")
+library("corrplot") 
+
+# load data
 dat <- read_csv(file = "https://raw.githubusercontent.com/MaRo406/eds-232-machine-learning/main/data/pumpkin-data.csv")
 ```
 
@@ -31,22 +34,22 @@ Should I buy them in half-bushel baskets or by the 1 1/9 bushel box?
 ## Examine the data
 
 ```{r data}
+# look at data
 glimpse(dat)
 ```
 
 ```{r}
 # Clean names to the snake_case convention
-
 pumpkins <- dat %>% clean_names(case = "snake")
 
 # Return column names
-
 pumpkins %>% names()
 ```
 
 ## Select desired columns
 
 ```{r}
+# select columns to simplify data frame
 pumpkins <- pumpkins %>% select(variety, city_name, package, low_price, high_price, date)
 
 
@@ -168,9 +171,11 @@ new_pumpkins %>%
 ```
 
 *Question 3:* Is this a useful plot? Does anything about it surprise you? 
-* **This plot is not very useful because there is such a wide range of prices per day, and it might be more useful to look at patterns over coarser scales such as months. The points seem to be grouped vertically, which I would assume is because there are different varieties of pumpkins, and each variety has different average prices over time.**
+
+* **This plot is not very useful because most people don't know what day of the year is in which month, and it might be more useful to look at patterns over coarser scales such as months. The points seem to be grouped vertically, which I would assume is because there are different varieties of pumpkins, and each variety is "clumped" into similar prices over time.**
 
 How do we make it more useful? To get charts to display useful data, you usually need to group the data somehow. 
+
 * **To make it more useful, we could group the data by month and even look at different averages among different pumpkin varieties.**
 
 *Question 4:* Group the pumpkins into groups based on the month column and then find the mean price for each month. Plot the results with a bar plot.
@@ -226,10 +231,11 @@ bake(): takes a prepped recipe and applies the operations to any data set.
 
 Now let's prep and bake our recipes to confirm that under the hood, the predictor columns will be first encoded before a model is fit.
 
- ```{r}
+```{r}
 # Prep the recipe
 pumpkins_prep <- prep(pumpkins_recipe)
 
+# look at pumpkin prep
 pumpkins_prep
 
 # Bake the recipe to extract a preprocessed new_pumpkins data
@@ -243,26 +249,33 @@ baked_pumpkins %>%
 The processed data baked_pumpkins has all its predictors encoded confirming that indeed the preprocessing steps defined as our recipe will work as expected. This makes it harder for you to read but more intelligible for tidymodels. Take a look at how the observations have been mapped to numbers.
 
 *Question 5:* From looking at the baked_pumpkins tibble, how many total cities are represented in the data set? 
+
 * **There are 10 total cities represented in the data set.**
 
 baked_pumpkins is a data frame that we can perform computations on. For instance, let's try to find a good correlation between two variables to potentially build a good predictive model. We'll use the function cor() to do this.
+
+* **The correlation between package and price is ~0.61.**
 
 ```{r}
 # Find the correlation between the package and the price
 cor(baked_pumpkins$package, baked_pumpkins$price)
 ```
 
-*Question 6:* Calculate the correlation between pumpkin price and two other variables in the data set
+*Question 6:* Calculate the correlation between pumpkin price and two other variables in the data set.
+
+* **The correlation between pumpkin price and variety is ~-0.86, and the correlation between price and city is ~0.32.**
 
 ```{r}
-#Correlation between price and other vars.
+# correlation between price and variety
 cor(baked_pumpkins$variety, baked_pumpkins$price)
 
+# correlation between price and city
 cor(baked_pumpkins$price, baked_pumpkins$city_name)
 ```
 
 *Question 7:* Which of these three variables is most highly correlated with price? Why might this be? 
-* **The variety variable is most highly correlated with price. This is likely because different varieties of pumpkins have widely different prices, such as other fruit with different varieties.**
+
+* **The variety variable is most highly correlated with price. This is likely because different varieties of pumpkins are different sizes or are of different quality, so the pricing patterns are similar among variety regardless of where they are and when they are sold.**
 
 Now let's visualize a correlation matrix of all the columns using the corrplot package.
 
@@ -277,7 +290,6 @@ corr_mat <- cor(baked_pumpkins %>%
 
 # Make a correlation plot between the variables
 corrplot(corr_mat, method = "shade", shade.col = NA, tl.col = "black", tl.srt = 45, addCoef.col = "black", cl.pos = "n", order = "original")
-
 ```
 
 ## Build a linear regression model
@@ -296,16 +308,13 @@ set.seed(123)
 pumpkins_split <- baked_pumpkins %>% 
   initial_split(prop = 0.8)
 
-
 # Extract training and test data
 pumpkins_train <- training(pumpkins_split)
 pumpkins_test <- testing(pumpkins_split)
 
-
 # Create a recipe for preprocessing the data
 lm_pumpkins_recipe <- recipe(price ~ package, data = pumpkins_train) %>% 
   step_integer(all_predictors(), zero_based = TRUE)
-
 
 # Create a linear model specification
 lm_spec <- linear_reg() %>% 
@@ -351,12 +360,10 @@ Let's start with making predictions for the test set then bind the columns to th
 predictions <- lm_wf_fit %>% 
   predict(new_data = pumpkins_test)
 
-
 # Bind predictions to the test set
 lm_results <- pumpkins_test %>% 
   select(c(package, price)) %>% 
   bind_cols(predictions)
-
 
 # Print the first ten rows of the tibble
 lm_results %>% 
@@ -389,7 +396,6 @@ package_encode <- lm_pumpkins_recipe %>%
   bake(new_data = pumpkins_test) %>% 
   select(package)
 
-
 # Bind encoded package column to the results
  plot_results <- lm_results %>%
  bind_cols(package_encode %>%
@@ -406,11 +412,14 @@ plot_results %>%
    geom_point(size = 1.6) +
    # Overlay a line of best fit
    geom_line(aes(y = .pred), color = "orange", linewidth = 1.2) +
-   xlab("package")
+   labs(x = "package", 
+        title = "Package type vs price")
 ```
 
 Hmm. The model does not do good job of generalizing the relationship between a package and its corresponding price.
 
-*Question 8:* What issues do you see with fitting a linear regression to this data? \* There is not a wide spread of data, and only 4 different package types. It is hard to fit a linear regression to data that does not have a lot of variety across the x axis.
+*Question 8:* What issues do you see with fitting a linear regression to this data? 
+
+* **Package type does not appear to have a linear relationship to price, especially because package is a categorical variable The price points are vertically grouped and do not follow a linear pattern. The package variable is not a true numeric variable, so it is difficult to capture the relationship between a categorical and numeric variable with a linear relationship.**
 
 Congratulations, you just created a model that can help predict the price of a few varieties of pumpkins. But you can probably create a better model! To be continued next week...
