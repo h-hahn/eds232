@@ -1,0 +1,153 @@
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(spData)
+library(ggpmisc)
+```
+
+```{r}
+redlining = read_csv(here::here("discussions", "data", "redlining.csv")) %>% 
+  left_join(us_states_df %>% rename(name = state)) %>% 
+  janitor::clean_names()
+```
+
+```{r}
+# look at data distributions
+ggplot(redlining) +
+  geom_point(aes(poverty_level_10, percent)) +
+  theme_minimal()
+
+ggplot(redlining) +
+  geom_point(aes(median_income_10, percent)) +
+  theme_minimal()
+
+ggplot(redlining) +
+  geom_boxplot(aes(region, percent)) +
+  geom_point(aes(region, percent)) +
+  theme_minimal()
+
+ggplot(redlining) +
+  geom_point(aes(total_pop_10, percent)) +
+  theme_minimal()
+```
+
+### Data Splitting
+
+```{r}
+# split the data
+split <- initial_split(redlining, prop = 0.7)
+
+# create training and testing data
+train <- training(split)
+test <- testing(split)
+
+# same as k-fold, v = k
+folds <- vfold_cv(train, v = 5, repeats = 2)
+```
+
+### Recipe Specification
+
+```{r}
+recipe <- recipe(percent ~ region + area + total_pop_10 + median_income_10 + poverty_level_10, data = train) %>%
+  step_normalize(all_numeric_predictors()) %>% # normalize the data
+  step_integer(all_nominal_predictors()) %>% # recode the variables
+  step_interact(terms = ~total_pop_10:median_income_10) %>% # create interaction terms
+  step_interact(terms = ~total_pop_10:poverty_level_10) %>% # create interaction terms
+  step_interact(terms = ~poverty_level_10:median_income_10) # create interaction terms
+```
+
+### Model: Tuned Linear Regression
+
+```{r}
+lm_model <- linear_reg(penalty = tune(), mixture = tune()) %>% # tune specifies to model that we are tuning those parameters
+  set_engine("glmnet") %>% 
+  set_mode("regression")
+
+lm_model
+```
+
+```{r}
+lm_wflw <- workflow() %>% 
+  add_model(lm_model) %>% 
+  add_recipe(recipe) 
+
+lm_wflw
+```
+
+```{r}
+?tune_grid
+```
+
+```{r, eval = FALSE}
+lm_cv_tune <- lm_wflw %>% 
+  tune_grid(resamples = folds, grids = 5)
+```
+
+```{r}
+?collect_metrics #from tune
+```
+
+```{r}
+collect_metrics(lm_cv_tune)
+```
+
+```{r}
+autoplot(lm_cv_tune) +
+  theme_bw() +
+  labs(x = "Parameter Value",
+       y = "Performance Metric",)
+```
+
+#### Finalize workflow
+
+```{r}
+?show_best
+?finalize_workflow()
+```
+
+```{r}
+lm_best <- show_best(lm_cv_tune, n = 1, metric = "rmse")
+
+lm_best
+
+lm_final <- finalize_workflow(lm_wflw, select_best(lm_cv_tune, metric = "rmse"))
+
+lm_final
+```
+
+### Model Fitting
+
+```{r, include=FALSE}
+ # fit the data to the training data
+lm_fit <- fit(lm_final, train)
+```
+
+```{r, include=FALSE}
+train_predict <- predict(lm_fit, train) %>% 
+  bind_cols(train)
+
+test_predict <- predict(lm_fit, test) %>% 
+  bind_cols(test)
+```
+
+```{r}
+train_metrics <- train_predict %>% 
+  metrics(percent, .pred)
+train_metrics
+
+test_metrics <- test_predict %>% 
+  metrics(percent, .pred)
+test_metrics
+```
+
+### Visualization
+
+```{r}
+ggplot(test_predict, aes(x = percent, y = .pred)) +
+  geom_point() +
+  stat_poly_line() +
+  stat_poly_eq(use_label("eq")) +
+  stat_poly_eq(label.y = 0.9)
+```
