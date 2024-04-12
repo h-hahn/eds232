@@ -39,7 +39,6 @@ genre_test <- testing(genre_split)
 genre_rec <- recipe(genre ~ ., genre_train) %>% 
   step_dummy(all_nominal_predictors(), one_hot = TRUE) %>% 
   step_normalize(all_numeric_predictors()) 
-  
 ```
 
 Set up a decision tree specification. Note: the cost_complexity parameter is a pruning penalty parameter that controls how much we penalize the number of terminal nodes in the tree.  It's conceptually similar to lambda from regularized regression.

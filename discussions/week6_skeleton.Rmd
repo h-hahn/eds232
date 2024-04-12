@@ -205,8 +205,7 @@ autoplot(xgb_cv_tune) + #plot cv results for parameter tuning
 #### Finalize workflow
 
 ```{r}
-xgb_best = show_best(xgb_cv_tune, n = 1, metric = "roc_auc") #get metrics for best random forest model
-
+xgb_best = show_best(xgb_cv_tune, n = 1, metric = "roc_auc") #get metrics for best model
 ```
 
 #### Model Fitting
@@ -233,7 +232,7 @@ train_fit_xgb
 ```
 
 ```{r}
-test_predict_rf = predict(train_fit_rf, test) %>% #get prediction probabilities for test 
+test_predict_rf = predict(train_fit_rf, test) %>% #get prediction probabilities for test
   bind_cols(test) %>%  #bind to testing column
   mutate(habitat = as.factor(habitat))
 

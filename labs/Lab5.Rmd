@@ -5,6 +5,30 @@ date: "2023-02-08"
 output: html_document
 ---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+
+library(spotifyr) #API interaction
+library(tidyverse)
+library(tidymodels)
+library(kknn) #knn modeling
+library(recipes) #data preprocessing
+library(rsample)  #data splitting 
+library(dplyr)
+library(vip)
+library(doParallel)  # for parallel backend to foreach
+library(foreach)     # for parallel processing with for loops
+library(caret)       # for general model fitting
+library(rpart)       # for fitting decision trees
+library(ipred)       # for fitting bagged decision trees
+library(ranger)
+library(baguette)
+library(kableExtra)
+
+set.seed(123)
+```
+
 This week's lab is a musical lab. You'll be requesting data from the Spotify API and using it to build k-nearest neighbor and decision tree models.
 
 In order to use the Spotify API you must have a Spotify account. If you don't have one, sign up for a free one here: <https://www.spotify.com/us/signup>
@@ -19,70 +43,94 @@ You have two options for completing this lab.
 
 **Option 2**: **Classify by genres**. Build models that predict which genre a song belongs to. This will use a pre-existing Spotify dataset available from Kaggle.com (<https://www.kaggle.com/datasets/mrmorj/dataset-of-songs-in-spotify>)
 
-```{r}
-library(spotifyr) #API interaction
-library(tidyverse)
-library(tidymodels)
-```
-
 Client ID and Client Secret are required to create and access token that is required to interact with the API. You can set them as system values so we don't have to do provide them each time.
 
 ```{r access_API}
-
 Sys.setenv(SPOTIFY_CLIENT_ID = '224890f1750c4bc0a087829f7573f804') 
 Sys.setenv(SPOTIFY_CLIENT_SECRET = '5e163d8044d64992b1d1518e1f933bbf')
 
 authorization_code <- get_spotify_authorization_code(scope = scopes()[c(1:19)]) #sets an authorization code that you'll need to provide for certain get_ functions via my_tracks <- get_my_saved_tracks(authorization = authorization_code)
-
 
 access_token <- get_spotify_access_token() #takes ID and SECRET, sends to Spotify and receives an access token
 ```
 
 **Option 1: Data Preparation**
 
-You can use get_my_saved_tracks() to request all your liked tracks. It would be good if you had at least 150-200 liked tracks so the model has enough data to work with. If you don't have enough liked tracks, you can instead use get_my_recently_played(), and in that case grab at least 500 recently played tracks if you can.
-
-The Spotify API returns a dataframe of tracks and associated attributes. However, it will only return up to 50 (or 20) tracks at a time, so you will have to make multiple requests. Use a function to combine all your requests in one call. 
-
 ```{r}
-my_tracks1 <- get_my_saved_tracks(limit = 50, authorization = authorization_code, offset = 0)
-my_tracks2 <- get_my_saved_tracks(limit = 50, authorization = authorization_code, offset = 50)
-my_tracks3 <- get_my_saved_tracks(limit = 50, authorization = authorization_code, offset = 100)
-my_tracks4 <- get_my_saved_tracks(limit = 50, authorization = authorization_code, offset = 150)
-my_tracks5 <- get_my_saved_tracks(limit = 50, authorization = authorization_code, offset = 200)
+# create vector of offset values we want
+offset_vector <- c(0, 50, 100, 150)
+# initialize empty data frame
+my_tracks200 <- data.frame()
 
-my_tracks_200 <- bind_rows(my_tracks1, my_tracks2, my_tracks3, my_tracks4, my_tracks5)
+# create for loop to get 200 saved songs
+for (i in offset_vector) {
+  
+  my_tracks50 <- get_my_saved_tracks(limit = 50, authorization = authorization_code, offset = i)
+  my_tracks200 <- bind_rows(my_tracks200, my_tracks50)
+  
+}
 ```
 
 Once you have your tracks, familiarize yourself with this initial dataframe. You'll need to request some additional information for the analysis. If you give the API a list of track IDs using get_track_audio_features(), it will return an audio features dataframe of all the tracks and some attributes of them.
 
 These track audio features are the predictors we are interested in, but this dataframe doesn't have the actual names of the tracks. Append the 'track.name' column from your favorite tracks database.
 ```{r}
-write.csv(my_tracks_200, "~/Documents/tracks.csv")
+# create list of only track ID but has to be by 100
+# get_track_audio_features only does 100 max 
+my_tracks_id1 <- my_tracks200 %>% 
+  head(100)
+my_tracks_id2 <- my_tracks200 %>% 
+  tail(100)
 
+# get track audio features for each 100
+features1 <- get_track_audio_features(my_tracks_id1$track.id)
+features2 <- get_track_audio_features(my_tracks_id2$track.id)
 
-get_track_audio_features()
+# combine features into one dataframe
+features_all <- bind_rows(features1, features2)
+
+# select track.name and track ID from initial dataframe to add to features dataframe
+my_tracks200_new <- my_tracks200 %>% 
+  select(track.name, track.id) %>% 
+  rename(id = track.id)
+
+# add track.name to features dataframe
+my_tracks_final <- left_join(features_all, my_tracks200_new) %>% 
+  mutate(person = "Hope Hahn")
+
+# save as csv to share with partner in class
+#write.csv(my_tracks_final, here::here("labs", "eds232_lab5_HHAHN.csv"))
 ```
 
 Find a class mate whose data you would like to use. Add your partner's data to your dataset. Create a new column that will contain the outcome variable that you will try to predict. This variable should contain two values that represent if the track came from your data set or your partner's.
 
+```{r}
+# reading in ben's dataset
+ben_music <- read_csv(here::here("labs", "ben_tracks.csv"))
+
+# add ben's name to his data & combine with my music
+hope_ben <- ben_music %>% 
+  mutate(person = "Ben Versteeg") %>% 
+  rbind(my_tracks_final) %>% 
+  select(-c(type, id, uri, track_href, analysis_url, track.name)) %>% 
+  mutate(time_signature = as.factor(time_signature),
+         person = as.factor(person),
+         mode = as.factor(mode),
+         key = as.factor(key))
+```
 
 ### **Modeling**
-
-Create competing models that predict whether a track belongs to:
-
-Option 1. you or your partner's collection
 
 You will eventually create four final candidate models:
 
 1.  k-nearest neighbor (Week 5)
 2.  decision tree (Week 5)
 3.  bagged tree (Week 6)
-    -   bag_tree()
-    -   Use the "times =" argument when setting the engine during model specification to specify the number of trees. The rule of thumb is that 50-500 trees is usually sufficient. The bottom of that range should be sufficient here.
+-   bag_tree()
+-   Use the "times =" argument when setting the engine during model specification to specify the number of trees. The rule of thumb is that 50-500 trees is usually sufficient. The bottom of that range should be sufficient here.
 4.  random forest (Week 6)
-    -   rand_forest()
-    -   m_try() is the new hyperparameter of interest for this type of model. Make sure to include it in your tuning process
+-   rand_forest()
+-   m_try() is the new hyperparameter of interest for this type of model. Make sure to include it in your tuning process
 
 Go through the modeling process for each model:
 
@@ -95,3 +143,269 @@ Tuning. Find the best values for each hyperparameter (within a reasonable range)
 Compare the performance of the four final models you have created.
 
 Use appropriate performance evaluation metric(s) for this classification task. A table would be a good way to display your comparison. Use at least one visualization illustrating your model results.
+
+### Preprocessing for all models
+
+**Prepare data and create recipe for all models.**
+
+```{r}
+#initial split of data 
+music_split <- initial_split(hope_ben, prop = 0.7)
+music_test <- testing(music_split)
+music_train <- training(music_split)
+
+# create recipe
+music_recipe <- recipe(person ~ ., data = music_train) %>% 
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE) %>% 
+  step_normalize(all_numeric(), -all_outcomes()) 
+
+# 10-fold CV on the training dataset 
+cv_folds <- music_train %>% 
+  vfold_cv(v = 10)
+```
+
+### K-Nearest Neighbors
+
+```{r}
+## Create model specification and workflow ----
+
+# specify k nearest neighbors model
+knn_spec <- nearest_neighbor(neighbors = tune()) %>% 
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+# save workflow to object
+knn_workflow <- workflow() %>% 
+  add_model(knn_spec) %>% 
+  add_recipe(music_recipe)
+
+## Tune parameters ----
+# parameter tuning
+fit_knn_cv <- knn_workflow %>% 
+  tune_grid(resamples = cv_folds, 
+            grid = data.frame(neighbors = c(1,5,seq(10,100,10))))
+
+## Finalize and model fitting ----
+# finalize the workflow to choose best model
+final_wf_knn <- knn_workflow %>% 
+  finalize_workflow(select_best(fit_knn_cv, metric = "accuracy"))
+
+# fit model to training set
+train_fit_knn <- fit(final_wf_knn, music_train)
+
+# predict train data
+train_predict_knn <- predict(object = train_fit_knn, new_data = music_train) %>% #predict the training set
+  bind_cols(music_train) #bind training set column to prediction
+
+# predict test data
+test_predict_knn <- predict(train_fit_knn, music_test) %>% #get prediction probabilities for test data
+  bind_cols(music_test) %>%  #bind to testing column
+  mutate(person <- as.factor(person))
+
+# test accuracy
+#accuracy(train_predict_knn, truth = person, estimate = .pred_class)
+accuracy_knn <- accuracy(test_predict_knn, truth = person, estimate = .pred_class)
+```
+
+***Visualize KNN Performance***
+
+```{r}
+# plot confusion matrix
+test_predict_knn %>% 
+  conf_mat(truth = person, estimate = .pred_class) %>% #create confusion matrix
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "KNN Confusion Matrix")
+```
+
+**The accuracy of the KNN model is `r accuracy_knn$.estimate`, meaning that the model only correctly predicts about three quarters of the test data correctly.**
+
+### Decision Tree
+
+```{r}
+# model specification
+tree_spec <- decision_tree(
+  cost_complexity = tune(),
+  tree_depth = tune(),
+  min_n = tune()) %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
+
+tree_grid <- grid_regular(cost_complexity(), tree_depth(), min_n(), levels = 5)
+
+# create workflow
+wf_tree <- workflow() %>% 
+  add_recipe(music_recipe) %>% 
+  add_model(tree_spec)
+
+doParallel::registerDoParallel() #build trees in parallel
+#200s
+
+  tree_rs <- tune_grid(
+    wf_tree,
+    resamples = cv_folds,
+    grid = tree_grid,
+    metrics = metric_set(accuracy)
+  )
+
+
+# finalize the workflow to select the best tree
+final_wf_tree <- finalize_workflow(wf_tree, select_best(tree_rs))
+
+# fit the train data to model
+final_fit_tree <- fit(final_wf_tree, data = music_train)
+
+# predict train data
+train_predict_tree <- predict(object = final_fit_tree, new_data = music_train) %>% #predict the training set
+  bind_cols(music_train) #bind training set column to prediction
+
+# predict test data
+test_predict_tree <- predict(final_fit_tree, music_test) %>% #get prediction probabilities for test data
+  bind_cols(music_test) %>%  #bind to testing column
+  mutate(person <- as.factor(person))
+
+# test accuracy
+#accuracy(train_predict_tree, truth = person, estimate = .pred_class)
+accuracy_tree <- accuracy(test_predict_tree, truth = person, estimate = .pred_class)
+```
+
+***Visualize Decision Tree Performance***
+
+```{r}
+# plot confusion matrix
+test_predict_tree %>% 
+  conf_mat(truth = person, estimate = .pred_class) %>% #create confusion matrix
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "Decision Tree Confusion Matrix")
+```
+
+**The accuracy of the decision tree model is `r accuracy_tree$.estimate`, which means that this model also only predicts about three quarters of the test data correctly.**
+
+### Bagged Tree
+
+```{r}
+# set model specification
+bag_model <- bag_tree(cost_complexity = 0,
+                      tree_depth = NULL,
+                      min_n = tune(),
+                      class_cost = NULL) %>% 
+  set_engine("rpart", times = 100) %>% 
+  set_mode("classification")
+
+# set workflow
+bag_wf <- workflow() %>% 
+  add_model(bag_model) %>% 
+  add_recipe(music_recipe)
+
+# tune parameters
+bag_cv_tune <- bag_wf %>%
+  tune_grid(
+    cv_folds,
+    grid = expand_grid(min_n=c(10,20,50)),
+    metrics = metric_set(accuracy))
+
+# finalize workflow
+bag_final <- finalize_workflow(bag_wf, 
+                               select_best(bag_cv_tune, metric = "accuracy"))
+
+# fit train data to model
+train_fit_bag <- fit(bag_final, music_train) 
+
+# predict train data
+train_predict_bag <- predict(object = train_fit_bag, new_data = music_train) %>% #predict the training set
+  bind_cols(music_train) #bind training set column to prediction
+
+# predict test data
+test_predict_bag <- predict(train_fit_bag, music_test) %>% #get prediction probabilities for test data
+  bind_cols(music_test) %>%  #bind to testing column
+  mutate(person <- as.factor(person))
+
+# test accuracy
+#accuracy(train_predict_bag, truth = person, estimate = .pred_class)
+accuracy_bag <- accuracy(test_predict_bag, truth = person, estimate = .pred_class)
+```
+
+***Visualize Bagging Performance***
+
+```{r}
+# plot confustion matrix
+test_predict_bag %>% 
+  conf_mat(truth = person, estimate = .pred_class) %>% #create confusion matrix
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "Random Forest Confusion Matrix")
+```
+
+**The accuracy of the bagging model is `r accuracy_bag$.estimate`. This model performs better than the previous two, but still only predicts about three quarters of the test data correctly.**
+
+### Random Forest
+
+```{r}
+# create model specification
+rf_model <- rand_forest(mtry = tune(),
+                        trees = tune()) %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+# create workflow
+rf_workflow <- workflow() %>% 
+  add_model(rf_model) %>% 
+  add_recipe(music_recipe)
+
+# tune paramaters
+rf_cv_tune <- rf_workflow %>%
+  tune_grid(resamples = cv_folds, grid = 10)
+
+# finalize workflow to select best model
+rf_final <- finalize_workflow(rf_workflow, 
+                              select_best(rf_cv_tune, metric = "accuracy"))
+
+# fit train data to model
+train_fit_rf <- fit(rf_final, music_train) 
+
+# predict train data
+train_predict_rf<- predict(object = train_fit_rf, new_data = music_train) %>% #predict the training set
+  bind_cols(music_train) #bind training set column to prediction
+
+# predict test data
+test_predict_rf <- predict(train_fit_rf, music_test) %>% #get prediction probabilities for test data
+  bind_cols(music_test) %>%  #bind to testing column
+  mutate(person <- as.factor(person))
+
+# test accuracy
+#accuracy(train_predict_rf, truth = person, estimate = .pred_class)
+accuracy_rf <- accuracy(test_predict_rf, truth = person, estimate = .pred_class)
+```
+
+***Visualize Random Forest Performance***
+```{r}
+# plot confustion matrix
+test_predict_rf %>% 
+  conf_mat(truth = person, estimate = .pred_class) %>% #create confusion matrix
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "Random Forest Confusion Matrix")
+```
+**The accuracy of the random forest model is `r accuracy_rf$.estimate`. This model is slightly better than the first two, but is slightly worse than the bagging model and still only predicts about three quarters of the test data correctly.**
+
+### Comparing Models
+
+```{r}
+# create data frame of accuracy
+accuracy_df <- data.frame(model = c("KNN", "Decision Tree", "Bagging", "Random Forest"),
+                          test_accuracy = c(accuracy_knn$.estimate, accuracy_tree$.estimate, accuracy_bag$.estimate, accuracy_rf$.estimate))
+
+# accuracy Table
+kable(accuracy_df, caption = "Accuracy of Each Model")
+```
+
+**The model that had the best performance was the Bagging model. This model had an accuracy of approximately `r accuracy_bag$.estimate`. However, the rest of the models had accuracy values that were not much lower than the bagging model. All models were comparable, but bagging just performed slightly better.**
