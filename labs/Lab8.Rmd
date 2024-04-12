@@ -1,0 +1,174 @@
+---
+title: "Lab 8"
+author: "Hope Hahn"
+date: "2024-03-06"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+
+set.seed(123)
+```
+
+## Forest Cover Classification with SVM
+
+In this week's lab we are exploring the use of Support Vector Machines for multi-class classification. Specifically, you will be using cartographic variables to predict forest cover type (7 types).
+
+Natural resource managers responsible for developing ecosystem management strategies require basic descriptive information including inventory data like forest cover type for forested lands to support their decision-making processes. However, managers generally do not have this type of data for in-holdings or neighboring lands that are outside their immediate jurisdiction. One method of obtaining this information is through the use of predictive models.
+
+You task is build both an SVM and a random forest model and compare their performance on accuracy and computation time.
+
+1.  The data is available here: <https://ucsb.box.com/s/ai5ost029enlguqyyn04bnlfaqmp8kn4>
+
+Explore the data.
+
+```{r}
+# load in data
+covtype1 <- read_csv(here::here("labs", "covtype_sample.csv")) %>% 
+  janitor::clean_names() 
+
+covtype2 <- covtype1 %>% 
+  mutate(cover_type = as.factor(cover_type))
+
+# look at head of data
+head(covtype1)
+
+hist(covtype1$cover_type)
+```
+
+-   What kinds of features are we working with?
+
+* **All the features in this dataset have numeric observations. All the soil types are a binary 0 or 1 and there is only one 1 per observation among all soil types. The wilderness areas are also binary. The cover type (dependent variable) are numbers, but they represent categories.**
+
+-   Does anything stand out that will affect you modeling choices?
+
+* **The distribution of the cover type variable is very skewed and most of the observations fall in the first two categories. There are also many classes, which may make SVM not work as well.**
+
+Hint: Pay special attention to the distribution of the outcome variable across the classes.
+
+2.  Create the recipe and carry out any necessary preprocessing. Can you use the same recipe for both models?
+
+* **You can use the same recipe for both models.**
+
+```{r}
+# split data
+covtype_split <- initial_split(covtype2, prop = 0.7, strata = cover_type)
+covtype_train <- training(covtype_split)
+covtype_test <- testing(covtype_split)
+
+# create recipe 
+recipe <- recipe(cover_type ~ ., data = covtype_train) %>% 
+  step_zv(all_predictors()) %>% 
+  step_center(numeric()) %>% 
+  step_scale(numeric())
+```
+
+3.  Create the folds for cross-validation.
+
+```{r}
+# create folds
+cv_folds = vfold_cv(covtype_train, v = 10)
+```
+
+4.  Tune the models. Choose appropriate parameters and grids. If the computational costs of tuning given your strategy are prohibitive, how might you work around this?
+
+* **The computation costs for svm_poly was much too high, so I will be using svm_rbf instead. The computation for random forests is pretty long too, but is not too long, so I will be using the normal tuning process.**
+
+***SVM***
+
+```{r}
+# create svm model spec
+svm_rbf_spec <- svm_rbf() %>% 
+  set_mode("classification") %>% 
+  set_engine("kernlab")
+
+#Fit the new specification
+system.time(
+  svm_rbf_fit <- svm_rbf_spec %>% 
+  fit(cover_type ~., data = covtype_train)
+  )
+```
+
+***RF***
+
+```{r}
+# random forest model spec
+rf_model_spec  <- rand_forest(mtry = tune(),
+                        trees = tune()) %>% 
+  set_engine("ranger") %>% 
+  set_mode("classification")
+
+# create workflow
+rf_workflow <- workflow() %>% 
+  add_model(rf_model_spec) %>% 
+  add_recipe(recipe)
+
+# tune paramaters
+system.time(
+  rf_cv_tune <- rf_workflow %>%
+  tune_grid(resamples = cv_folds, 
+            grid = 10)
+  ) #use cross validation to tune mtry and trees parameters
+
+# finalize workflow to select best model
+rf_final <- finalize_workflow(rf_workflow, 
+                              select_best(rf_cv_tune, metric = "accuracy"))
+
+# fit train data to model
+train_fit_rf <- fit(rf_final, covtype_train) 
+```
+
+5.  Conduct final predictions for both models and compare their prediction performances and computation costs from part 4.
+
+* **The computation costs from the SVM model is much less than the RF model because the svm_rbf does not require tuning. (4 seconds vs 1215 seconds).**
+
+***SVM***
+
+```{r}
+test_predict_svm <- predict(object = svm_rbf_fit, new_data = covtype_test) %>% 
+  bind_cols(covtype_test)
+
+accuracy_svm <- accuracy(test_predict_svm, truth = cover_type, estimate = .pred_class)
+
+#Examine model performance via confusion matrix
+augment(svm_rbf_fit, new_data = covtype_test) %>% 
+  conf_mat(truth = cover_type, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "SVM Confusion Matrix")
+```
+***RF***
+
+```{r}
+# predict test data
+test_predict_rf <- predict(train_fit_rf, covtype_test) %>% #get prediction probabilities for test data
+  bind_cols(covtype_test) 
+
+# test accuracy
+accuracy_rf <- accuracy(test_predict_rf, truth = cover_type, estimate = .pred_class)
+
+# plot confustion matrix
+test_predict_rf %>% 
+  conf_mat(truth = cover_type, estimate = .pred_class) %>% #create confusion matrix
+  autoplot(type = "heatmap") + #plot confusion matrix with heatmap
+  theme_bw() + #change theme
+  theme(axis.text.x = element_text(angle = 30, hjust=1)) +
+  #rotate axis labels
+  labs(title = "Random Forest Confusion Matrix")
+```
+
+-   Which type of model do you think is better for this task?
+
+* **The random forest model is better for this task. The accuracy for the rf model was `r accuracy_rf$.estimate` while the accuracy of the svm model was `r accuracy_svm$.estimate`.**
+
+-   Why do you speculate this is the case?
+
+* **The random forest model is better for multiclass problems, while svm works better when there are only two classes. Random forest also works well when features are both numeric and categorical. Additionally, svm works better for smaller datasets, and this dataset was quite large. It is also possible that there was not a clear margin of separation among classes, which would make svm not work as well.**
+

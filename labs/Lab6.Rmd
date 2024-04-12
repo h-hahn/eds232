@@ -1,0 +1,273 @@
+---
+title: "Lab6"
+author: "Hope Hahn"
+date: "2023-03-01"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+
+set.seed(42)
+```
+
+## Case Study: Eel Distribution Modeling
+
+This week's lab follows a project modeling the eel species Anguilla australis described by Elith et al. (2008). There are two data sets for this lab.  You'll use one for training and evaluating your model, and you'll use your model to make predictions predictions on the other.  Then you'll compare your model's performance to the model used by Elith et al.
+
+## Data
+
+Grab the training data sets (eel.model.data.csv, eel.eval.data.csv) from github here:
+https://github.com/MaRo406/eds-232-machine-learning/blob/main/data 
+
+```{r}
+# read in data 
+eel_model <- read_csv(here::here("labs", "eel.model.data.csv")) %>% 
+  mutate(Angaus = as.factor(Angaus)) %>% 
+  select(-Site)
+
+# read in eval data
+eel_eval <- read_csv(here::here("labs", "eel.eval.data.csv")) %>% 
+  rename(Angaus = Angaus_obs) %>% 
+  mutate(Angaus = as.factor(Angaus))
+```
+
+### Split and Resample
+
+Split the model data (eel.model.data.csv) into a training and test set, stratified by outcome score (Angaus). Use 10-fold CV to resample the training set.
+
+```{r}
+# split model data
+eel_split <- initial_split(eel_model)
+eel_train <- training(eel_split)
+eel_test <- testing(eel_split)
+
+# 10-fold CV
+eel_cv <- eel_train %>% 
+  vfold_cv(v = 10)
+```
+
+
+### Preprocess
+
+Create a recipe to prepare your data for the XGBoost model
+
+```{r}
+# create recipe
+eel_recipe <- recipe(Angaus ~ ., data = eel_train) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_numeric_predictors())
+```
+
+## Tuning XGBoost
+
+### Tune Learning Rate
+
+Following the XGBoost tuning strategy outlined in lecture, first we conduct tuning on just the learning rate parameter:
+
+1.  Create a model specification using {xgboost} for the estimation
+
+-   Only specify one parameter to tune()
+
+```{r}
+# model specification
+eel_xgb <- boost_tree(learn_rate = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+# set workflow
+eel_wf <- workflow() %>% 
+  add_model(eel_xgb) %>% 
+  add_recipe(eel_recipe)
+```
+
+2.  Set up a grid to tune your model by using a range of learning rate parameter values: expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+
+-   Use appropriate metrics argument(s) - Computational efficiency becomes a factor as models get more complex and data get larger. Record the time it takes to run. Do this for each tuning phase you run.You could use {tictoc} or Sys.time().
+
+```{r}
+# tune hyperparameters
+system.time(
+  xgb_tune <- eel_wf %>% 
+    tune_grid(eel_cv,
+              grid = expand.grid(learn_rate = seq(0.0001, 0.3, length.out = 30))
+              )
+  )
+```
+
+
+3.  Show the performance of the best models and the estimates for the learning rate parameter values associated with each.
+
+```{r}
+# show the best model
+show_best(xgb_tune)
+
+# select best learn rate
+best1 <- select_best(xgb_tune)
+lr_best <- best1$learn_rate
+```
+
+### Tune Tree Parameters
+
+1.  Create a new specification where you set the learning rate (which you already optimized) and tune the tree parameters.
+
+```{r}
+# model specification
+eel_xgb2 <- boost_tree(learn_rate = lr_best, 
+                       trees = 3000, 
+                       tree_depth = tune(), 
+                       min_n = tune(), 
+                       loss_reduction = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+# set workflow
+eel_wf2 <- workflow() %>% 
+  add_model(eel_xgb2) %>% 
+  add_recipe(eel_recipe)
+```
+
+2.  Set up a tuning grid. This time use grid_latin_hypercube() to get a representative sampling of the parameter space
+
+```{r}
+# tune hyperparameters
+system.time(
+  xgb_tune2 <- eel_wf2 %>% 
+    tune_grid(eel_cv, 
+              grid = grid_latin_hypercube(tree_depth(), min_n(), loss_reduction())
+              )
+  )
+```
+
+
+3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
+
+```{r}
+# show best models
+show_best(xgb_tune2)
+
+# select best parameters
+best2 <- select_best(xgb_tune2)
+depth_best <- best2$tree_depth
+min_n_best <- best2$min_n
+loss_best <- best2$loss_reduction
+```
+
+
+### Tune Stochastic Parameters
+
+1.  Create a new specification where you set the learning rate and tree parameters (which you already optimized) and tune the stochastic parameters.
+
+```{r}
+# set model spec
+eel_xgb3 <- boost_tree(learn_rate = lr_best, 
+                       trees = 3000, 
+                       tree_depth = depth_best, 
+                       min_n = min_n_best, 
+                       loss_reduction = loss_best,
+                       mtry = tune(), 
+                       sample_size = tune()) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("classification")
+
+# set workflow
+eel_wf3 <- workflow() %>% 
+  add_model(eel_xgb3) %>% 
+  add_recipe(eel_recipe)
+```
+
+2.  Set up a tuning grid. Use grid_latin_hypercube() again.
+
+```{r}
+# tune parameters
+system.time(
+  xgb_tune3 <- eel_wf3 %>% 
+    tune_grid(eel_cv, 
+              grid_latin_hypercube(finalize(mtry(), eel_train), 
+                                   sample_size = sample_prop()
+              )
+  ))
+```
+
+3.  Show the performance of the best models and the estimates for the tree parameter values associated with each.
+
+```{r}
+# show best models
+show_best(xgb_tune3)
+
+# select best parameters
+best3 <- select_best(xgb_tune3)
+mtry_best <- best3$mtry
+size_best <- best3$sample_size
+```
+
+
+## Finalize workflow and make final prediction
+
+```{r}
+# finalize workflow
+xgb_final <- finalize_workflow(eel_wf3,
+                               select_best(xgb_tune3, metric = "roc_auc"))
+
+# fit model training data
+train_fit_xgb <- fit(xgb_final, eel_train)
+
+# predict with test data
+test_predict_xgb <- predict(train_fit_xgb, eel_test) %>% #get prediction probabilities for test
+  bind_cols(eel_test) #bind to testing column
+
+# get accuracy
+accuracy <- accuracy(test_predict_xgb, truth = Angaus, estimate = .pred_class)
+```
+
+1. How well did your model perform? What types of errors did it make?
+
+* **The model's accuracy was `r accuracy$.estimate`. The model had higher rates of type 2 errors.**
+
+```{r}
+# confusion matrix with heatmap
+test_predict_xgb %>% 
+  conf_mat(truth = Angaus, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+## Fit your model the evaluation data and compare performance
+
+1.  Now used your final model to predict on the other dataset (eval.data.csv)
+
+```{r}
+# prediction on eval data
+eval_predict <- predict(train_fit_xgb, eel_eval) %>%
+  bind_cols(eel_eval) #bind to testing column
+```
+
+2.  How does your model perform on this data?
+
+```{r}
+# get accuracy on eval data
+accuracy_eval <- accuracy(eval_predict, truth = Angaus, estimate = .pred_class)
+
+# confusion matrix with heatmap
+eval_predict %>% 
+  conf_mat(truth = Angaus, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+```
+
+* **The accuracy of the model on the eval data is `r accuracy_eval$.estimate`. This is slightly lower than the accuracy on the test portion of the previous data. Type II errors are still the more common type of error.**
+
+3.  How do your results compare to those of Elith et al.?
+
+-   Use {vip} to compare variable importance
+-   What do your variable importance results tell you about the distribution of this eel species?
+
+```{r}
+vip::vip(train_fit_xgb) + 
+  theme_minimal() +
+  labs(title = "Variable Importance Plot")
+```
+
+* **According to our model, the vip shows us that this eel species is dependent on Summer temperatures and the amount of rain days. It likely lives in areas with warmer temperatures. Additionally, it lives closer to coastal areas and is dependent on area of Indigenous forest. According to the Elith model, the Summer temperatures is the most important variable as well, so heat seems to be the main factor affecting this species distribution. Both models show that variables such as Winter temperature and segments of low flow do not determine the distribution as much. Overall, the variable importance results are not exactly the same, but they are very similar, with the order being very slightly different.**
